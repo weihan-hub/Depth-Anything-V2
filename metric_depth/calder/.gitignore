@@ -1,0 +1,6 @@
+# Training outputs, eval results, checkpoints (.pth)
+results/
+
+# Python caches
+__pycache__/
+*.pyc
