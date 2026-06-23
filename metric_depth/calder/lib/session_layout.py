@@ -20,6 +20,9 @@ GT_DEPTH_RELPATH = {
 GSPLAT_DEPTH_RELPATH = GT_DEPTH_RELPATH["gsplat"]
 
 META_RELPATH = os.path.join("pycusfm_poses", "keyframes", "frames_meta.json")
+# batch_slam fallback: convert_tum_to_colmap writes a pycusfm-format meta here
+# (same schema, poses in keyframes_metadata.camera_to_world).
+COLMAP_META_RELPATH = os.path.join("colmap", "kpmap", "keyframes", "frames_meta.json")
 
 _SESSION_RE = re.compile(r"session=([0-9a-fA-F-]{36})")
 _CAM_RE = re.compile(r"^stereo_camera_")
@@ -67,12 +70,29 @@ def _cam_dirs(root):
     return out
 
 
+def _detect_rgb_ext(rgb_dir):
+    """Sample the first image under the first stereo_camera_* subdir to learn the
+    RGB extension: .jpeg (pycusfm) or .jpg (batch_slam). Defaults to .jpeg."""
+    if not rgb_dir or not os.path.isdir(rgb_dir):
+        return ".jpeg"
+    for name in sorted(os.listdir(rgb_dir)):
+        sub = os.path.join(rgb_dir, name)
+        if not (_CAM_RE.match(name) and os.path.isdir(sub)):
+            continue
+        for f in os.listdir(sub):
+            ext = os.path.splitext(f)[1].lower()
+            if ext in (".jpeg", ".jpg"):
+                return ext
+    return ".jpeg"
+
+
 @dataclass
 class SessionLayout:
     uuid: str
     run_dir: str | None = None
     rgb_dir: str | None = None          # absolute path to the RGB parent (extracted/ ...)
     rgb_kind: str | None = None         # "extracted" | "pycusfm_input"
+    rgb_ext: str = ".jpeg"              # actual RGB ext on disk (.jpeg pycusfm / .jpg batch_slam)
     gt_depth_root: str | None = None    # absolute path to chosen GT depth parent
     gsplat_depth_root: str | None = None
     meta_path: str | None = None
@@ -92,12 +112,14 @@ def detect_layout(uuid, output_bases, gt_source="depth", run_subdir="nurec_run1"
         lay.state = "absent"
         return lay
 
-    # RGB dir
+    # RGB dir + actual extension (.jpeg pycusfm / .jpg batch_slam)
     for cand in RGB_DIR_CANDIDATES:
         p = os.path.join(run_dir, cand)
         if os.path.isdir(p):
             lay.rgb_dir, lay.rgb_kind = p, cand
             break
+    if lay.rgb_dir:
+        lay.rgb_ext = _detect_rgb_ext(lay.rgb_dir)
 
     # GT depth root (per source) + always record gsplat root if present
     gt_root = os.path.join(run_dir, GT_DEPTH_RELPATH[gt_source])
@@ -105,9 +127,13 @@ def detect_layout(uuid, output_bases, gt_source="depth", run_subdir="nurec_run1"
     gsplat_root = os.path.join(run_dir, GSPLAT_DEPTH_RELPATH)
     lay.gsplat_depth_root = gsplat_root if os.path.isdir(gsplat_root) else None
 
-    # meta
-    meta = os.path.join(run_dir, META_RELPATH)
-    lay.meta_path = meta if os.path.exists(meta) else None
+    # pose/intrinsics meta: pycusfm layout first, colmap (batch_slam) fallback
+    lay.meta_path = None
+    for relpath in (META_RELPATH, COLMAP_META_RELPATH):
+        cand = os.path.join(run_dir, relpath)
+        if os.path.exists(cand):
+            lay.meta_path = cand
+            break
 
     # cameras with GT depth
     if lay.gt_depth_root:

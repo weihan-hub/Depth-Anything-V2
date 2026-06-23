@@ -4,13 +4,17 @@ Adapted from metric_depth/train.py with DDP/tensorboard stripped out:
   - init from the FULL Hypersim metric checkpoint (encoder + metric head),
   - dual-LR AdamW (head 10x) with polynomial LR decay (train.py recipe),
   - random horizontal-flip augmentation,
-  - per-epoch eval on the held-out test split (util.metric.eval_depth),
-  - save best.pth (lowest abs_rel) and latest.pth as raw model state_dicts.
+  - per-epoch eval on the held-out VAL split (util.metric.eval_depth) for
+    checkpoint/hyperparameter selection,
+  - save best.pth (lowest val abs_rel) and latest.pth as raw model state_dicts.
+
+The TEST split is NOT touched here -- it stays untouched until you run
+app/evaluate.py once on best.pth for the final, unbiased report.
 
     cd metric_depth
     uv run python -m calder.app.finetune \
         --train-manifest calder/datasets/splits/all_cams/train_contiguous.jsonl \
-        --test-manifest  calder/datasets/splits/all_cams/test_contiguous.jsonl \
+        --val-manifest   calder/datasets/splits/all_cams/val_contiguous.jsonl \
         --max-depth 20 --epochs 10 --bs 4 --lr 5e-6 \
         --out-dir calder/results/finetune/all_cams/contiguous
 """
@@ -63,7 +67,10 @@ def evaluate(model, loader, min_depth, max_depth, device):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--train-manifest", required=True)
-    ap.add_argument("--test-manifest", required=True)
+    ap.add_argument("--val-manifest", required=True,
+                    help="held-out VAL split; drives best.pth / hyperparameter "
+                         "selection. Keep TEST out of this -- eval it once via "
+                         "app/evaluate.py at the end.")
     ap.add_argument("--encoder", default="vits", choices=list(MODEL_CONFIGS))
     ap.add_argument("--checkpoint", default=paths.METRIC_HYPERSIM_VITS)
     ap.add_argument("--bs", type=int, default=4)
@@ -85,12 +92,12 @@ def main():
 
     # --- data ---
     trainset = CalderDepthDataset(args.train_manifest, mode='train', size=size)
-    testset = CalderDepthDataset(args.test_manifest, mode='val', size=size)
+    valset = CalderDepthDataset(args.val_manifest, mode='val', size=size)
     trainloader = DataLoader(trainset, batch_size=args.bs, shuffle=True,
                              num_workers=4, pin_memory=True, drop_last=True)
-    testloader = DataLoader(testset, batch_size=1, shuffle=False,
-                            num_workers=4, pin_memory=True)
-    print(f"train={len(trainset)}  test={len(testset)}  "
+    valloader = DataLoader(valset, batch_size=1, shuffle=False,
+                           num_workers=4, pin_memory=True)
+    print(f"train={len(trainset)}  val={len(valset)}  "
           f"iters/epoch={len(trainloader)}")
 
     # --- model: inherit full metric checkpoint (encoder + metric head) ---
@@ -109,7 +116,7 @@ def main():
     total_iters = args.epochs * len(trainloader)
 
     # --- baseline eval before any training step ---
-    base_metrics, base_n = evaluate(model, testloader, args.min_depth, args.max_depth, device)
+    base_metrics, base_n = evaluate(model, valloader, args.min_depth, args.max_depth, device)
     print(f"[epoch -1 / pretrained] abs_rel={base_metrics['abs_rel']:.4f} "
           f"rmse={base_metrics['rmse']:.4f} d1={base_metrics['d1']:.4f} (n={base_n})")
 
@@ -146,7 +153,7 @@ def main():
         avg_loss = running / len(trainloader)
         history['train_loss'].append(avg_loss)
 
-        metrics, n = evaluate(model, testloader, args.min_depth, args.max_depth, device)
+        metrics, n = evaluate(model, valloader, args.min_depth, args.max_depth, device)
         history['eval'].append({'epoch': epoch, **metrics, 'n': n})
         print(f"[epoch {epoch}] train_loss={avg_loss:.4f}  "
               f"abs_rel={metrics['abs_rel']:.4f} rmse={metrics['rmse']:.4f} "
@@ -169,7 +176,7 @@ def main():
     ax[1].plot(ep, [e['abs_rel'] for e in history['eval']], marker='o', label='abs_rel')
     ax[1].plot(ep, [e['rmse'] for e in history['eval']], marker='s', label='rmse (m)')
     ax[1].axvline(-1, ls='--', c='gray'); ax[1].set_xlabel("epoch (-1=pretrained)")
-    ax[1].legend(); ax[1].set_title("test metrics")
+    ax[1].legend(); ax[1].set_title("val metrics")
     fig.tight_layout()
     fig.savefig(os.path.join(args.out_dir, "curves.png"), dpi=90)
     print(f"\nbaseline abs_rel={base_metrics['abs_rel']:.4f} -> best abs_rel={best_abs_rel:.4f}")

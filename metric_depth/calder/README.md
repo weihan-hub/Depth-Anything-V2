@@ -59,13 +59,14 @@ uv run python -m calder.app.split_manifest --camera-name "" --split-mode contigu
     --test-out  calder/datasets/splits/all_cams/test_contiguous.jsonl
 
 # 4. Finetune (init from full Hypersim metric ckpt; dual-LR + poly decay + hflip)
+#    best.pth is selected on --val-manifest; TEST is left untouched for step 5.
 uv run python -m calder.app.finetune \
     --train-manifest calder/datasets/splits/all_cams/train_contiguous.jsonl \
-    --test-manifest  calder/datasets/splits/all_cams/test_contiguous.jsonl \
+    --val-manifest   calder/datasets/splits/all_cams/val_contiguous.jsonl \
     --max-depth 20 --epochs 10 --bs 4 --lr 5e-6 \
     --out-dir calder/results/finetune/all_cams/contiguous
 
-# 5. Compare baseline vs finetuned on the test set (metrics + qual panels)
+# 5. Compare baseline vs finetuned on the held-out TEST set (metrics + qual panels)
 uv run python -m calder.app.evaluate \
     --test-manifest calder/datasets/splits/all_cams/test_contiguous.jsonl \
     --checkpoint calder/results/finetune/all_cams/contiguous/best.pth \

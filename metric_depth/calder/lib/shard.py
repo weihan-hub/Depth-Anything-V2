@@ -101,6 +101,7 @@ def build_shard(layout, args, data_dir, shards_dir):
 
     cam_params, name_to_cpid, kf_index = _load_meta(layout.meta_path)
     cam_filter = set(args.cameras) if getattr(args, "cameras", None) else None
+    rgb_ext = getattr(layout, "rgb_ext", ".jpeg")   # .jpeg pycusfm / .jpg batch_slam
 
     rows = []
     cam_stats = {}
@@ -123,19 +124,20 @@ def build_shard(layout, args, data_dir, shards_dir):
 
         for ts in ts_list:
             tot["frames"] += 1
-            rgb_src = os.path.join(layout.rgb_dir, cam, ts + ".jpeg")
+            rgb_src = os.path.join(layout.rgb_dir, cam, ts + rgb_ext)
             if not os.path.exists(rgb_src):
                 tot["missing_rgb"] += 1
                 continue
 
-            image_name = f"{cam}/{ts}.jpeg"
+            image_name = f"{cam}/{ts}{rgb_ext}"
             kf = kf_index.get(image_name)
             if kf is None:
                 tot["missing_kf"] += 1
-            cpid = (kf.get("camera_params_id") if kf else None) or cpid_default
-            cp = cam_params[cpid]
+            cpid = kf.get("camera_params_id") if kf else None
+            if cpid is None:                      # pycusfm left_left omits it
+                cpid = cpid_default
+            cp = cam_params[str(cpid)]            # JSON keys are strings; colmap stores int cpid
             K = projection_to_K(cp["calibration_parameters"]["projection_matrix"]["data"])
-            body_T_cam = pose_to_4x4(cp["sensor_meta_data"]["sensor_to_vehicle_transform"])
             world_T_cam = pose_to_4x4(kf["camera_to_world"]) if kf else None
 
             gt_src = os.path.join(layout.gt_depth_root, cam, ts + ".png")
@@ -209,7 +211,7 @@ def build_shard(layout, args, data_dir, shards_dir):
                 "valid_mask_path": mask_dst,
                 "confidence_path": conf_dst,
                 "confidence_kind": "valid_mask",
-                "K": K, "world_T_cam": world_T_cam, "body_T_cam": body_T_cam,
+                "K": K, "world_T_cam": world_T_cam,
                 "neighbors": [],
                 "quality": q,
                 "kept": kept, "drop_reason": drop_reason,

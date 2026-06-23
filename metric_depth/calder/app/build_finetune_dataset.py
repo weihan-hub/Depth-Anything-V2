@@ -24,6 +24,7 @@ from calder.config import paths
 from calder.lib.session_layout import detect_layout, parse_selection
 from calder.lib import shard as shard_mod
 from calder.lib import split as split_mod
+from calder.lib import synthetic_shard as synth_mod
 
 _UUID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
 
@@ -58,6 +59,16 @@ def build_argparser():
     ap.add_argument("--include-unlisted", action="store_true",
                     help="also build present sessions not in the selection list")
     ap.add_argument("--force", action="store_true", help="rebuild cached shards")
+    # flat pre-rendered synthetic deliveries (rgb/ + depth/ + frames_meta.json),
+    # split at the frame level instead of the session level
+    ap.add_argument("--synthetic-delivery", action="append", default=None,
+                    help="path to a flat synthetic delivery dir; repeatable")
+    ap.add_argument("--synthetic-name", action="append", default=None,
+                    help="dataset name for the matching --synthetic-delivery "
+                         "(default: the delivery dir's basename); repeatable, positional")
+    ap.add_argument("--block-size", type=int, default=synth_mod.DEFAULT_BLOCK_SIZE,
+                    help="synthetic frame-level split: consecutive waypoints per "
+                         "leakage-safe block")
     # split
     ap.add_argument("--train-frac", type=float, default=0.70)
     ap.add_argument("--val-frac", type=float, default=0.15)
@@ -125,7 +136,22 @@ def main():
               "(none downloaded, or all off the selection list — try --include-unlisted "
               "or --sessions)")
 
+    # pair each --synthetic-delivery with a name (positional --synthetic-name,
+    # else the delivery dir's basename)
+    synth_pairs = []
+    for i, d in enumerate(args.synthetic_delivery or []):
+        d = os.path.abspath(d)
+        names = args.synthetic_name or []
+        name = names[i] if i < len(names) else os.path.basename(d.rstrip("/"))
+        synth_pairs.append((d, name))
+    if synth_pairs:
+        print(f"synthetic deliveries: {[n for _, n in synth_pairs]}")
+
     if args.dry_run:
+        for d, name in synth_pairs:
+            s = synth_mod.build_synthetic_delivery(d, name, args, data_dir, shards_dir)
+            print(f"  SYNTHETIC {name}: cams={s['n_cameras']} waypoints={s['n_waypoints']} "
+                  f"frames={s['n_frames']} planned(pre-dedup)={s['planned_split_pre_dedup']}")
         print("dry-run: stopping before shard build.")
         return
 
@@ -141,11 +167,23 @@ def main():
               f"kept={tot.get('kept', 0)} dropped={tot.get('dropped', 0)} "
               f"missing_rgb={tot.get('missing_rgb', 0)}")
 
+    # --- Phase 3b: synthetic deliveries (frame-level split, own shard) ---
+    synth_statuses = {}
+    for d, name in synth_pairs:
+        st = synth_mod.build_synthetic_delivery(d, name, args, data_dir, shards_dir)
+        synth_statuses[name] = st
+        print(f"  synthetic {name}: state={st['state']}  kept={st['totals']['kept']} "
+              f"dropped={st['totals']['dropped']}  counts={st['counts']}")
+
     # --- Phase 4: deterministic quota-greedy split (only 'built' sessions) ---
     ratios = {"train": args.train_frac, "val": args.val_frac, "test": args.test_frac}
     built = [u for u, st in statuses.items() if st["state"] == "built"]
     data = split_mod.load_assignment(split_path, args.split_seed, ratios)
     split_mod.assign_new_sessions(data, built, ratios, args.split_seed)
+    # synthetic deliveries are split per frame, not per session: record a sentinel
+    # so the whole-session assembler skips them (their rows carry their own split).
+    for name in synth_statuses:
+        data["assignments"][name] = "frame-level"
     split_mod.save_assignment(split_path, data)
     assignments = data["assignments"]
 
@@ -158,7 +196,7 @@ def main():
         split = assignments[u]
         sp = os.path.join(shards_dir, f"{u}.jsonl")
         if split not in writers or not os.path.exists(sp):
-            continue
+            continue   # "frame-level" synthetic shards are assembled below
         with open(sp) as f:
             for line in f:
                 if not line.strip():
@@ -167,6 +205,23 @@ def main():
                 if not row.get("kept"):
                     continue
                 row["split"] = split
+                writers[split].write(json.dumps(row) + "\n")
+                counts[split] += 1
+    # synthetic shards: each kept row already carries its own frame-level split
+    for name in sorted(synth_statuses):
+        sp = os.path.join(shards_dir, f"{name}.jsonl")
+        if not os.path.exists(sp):
+            continue
+        with open(sp) as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                if not row.get("kept"):
+                    continue
+                split = row.get("split")
+                if split not in writers:
+                    continue
                 writers[split].write(json.dumps(row) + "\n")
                 counts[split] += 1
     for s, w in writers.items():
@@ -180,6 +235,12 @@ def main():
                             "kept": st.get("totals", {}).get("kept", 0),
                             "dropped": st.get("totals", {}).get("dropped", 0),
                             "split": assignments.get(u)}
+    for name, st in synth_statuses.items():
+        sessions_meta[name] = {"state": st["state"], "kind": "synthetic",
+                               "kept": st.get("totals", {}).get("kept", 0),
+                               "dropped": st.get("totals", {}).get("dropped", 0),
+                               "split": "frame-level",
+                               "split_counts": st.get("counts", {})}
     meta = {
         "builder_version": shard_mod.BUILDER_VERSION,
         "built_at": datetime.datetime.now().isoformat(timespec="seconds"),
