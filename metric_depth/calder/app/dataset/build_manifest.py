@@ -6,7 +6,7 @@ Reads the keyframe metadata (poses + intrinsics) and emits one JSONL line per
 
 Run from the ``metric_depth/`` directory:
 
-    uv run python -m calder.app.build_manifest    # data-root / out default to calder.config.paths
+    uv run python -m calder.app.dataset.build_manifest    # data-root / out default to calder.config.paths
 """
 import argparse
 import json

@@ -12,7 +12,7 @@ train/test split. Two modes:
                 (test is a different stretch of the trajectory).
 
     cd metric_depth
-    uv run python -m calder.app.split_manifest --camera-name "" --split-mode contiguous \
+    uv run python -m calder.app.dataset.split_manifest --camera-name "" --split-mode contiguous \
         --train-out calder/datasets/splits/all_cams/train_contiguous.jsonl \
         --test-out  calder/datasets/splits/all_cams/test_contiguous.jsonl
 """

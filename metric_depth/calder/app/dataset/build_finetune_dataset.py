@@ -8,9 +8,9 @@ new sessions and never reshuffles prior split assignments.
 
     cd metric_depth
     # dry-run discovery
-    uv run python -m calder.app.build_finetune_dataset --dry-run --include-unlisted
+    uv run python -m calder.app.dataset.build_finetune_dataset --dry-run --include-unlisted
     # build the two test sessions
-    uv run python -m calder.app.build_finetune_dataset --include-unlisted \
+    uv run python -m calder.app.dataset.build_finetune_dataset --include-unlisted \
         --sessions 6dcb9a95-0d73-4f13-ad5e-c377b7564fbf \
                    c391d83a-2958-40b6-a637-7f963e64f07f
 """

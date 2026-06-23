@@ -4,7 +4,7 @@ Pull N random samples from CalderDepthDataset and save a panel per sample:
 RGB | GT depth | valid mask | depth histogram. Prints K + depth stats so we can
 eyeball that RGB/depth are aligned and depths are in plausible meters.
 
-    uv run python -m calder.app.visualize_dataloader --n 6
+    uv run python -m calder.app.dataset.visualize_dataloader --n 6
 """
 import argparse
 import json

@@ -7,7 +7,7 @@ like train.py's val loop), and reports the full eval_depth metric table. Run it
 once per checkpoint to compare original vs finetuned on the SAME test set.
 
     cd metric_depth
-    uv run python -m calder.app.evaluate \
+    uv run python -m calder.app.evaluate.evaluate \
         --test-manifest calder/datasets/splits/all_cams/test_contiguous.jsonl \
         --checkpoint calder/results/finetune/all_cams/contiguous/best.pth \
         --baseline-checkpoint <original metric ckpt> \

@@ -14,12 +14,16 @@ calder/
 ├── lib/                           # reusable library code (imported, no side effects)
 │   ├── dataset.py                 # CalderDepthDataset
 │   └── model.py                   # MODEL_CONFIGS + build_model / load_state_flexible
-├── app/                           # CLI entrypoints (uv run python -m calder.app.<x>)
-│   ├── build_manifest.py          #   frames_meta.json -> manifest.jsonl
-│   ├── split_manifest.py          #   manifest -> 70/30 train/test (random | contiguous)
-│   ├── finetune.py                #   single-GPU finetune + per-epoch eval
-│   ├── evaluate.py                #   eval a checkpoint; GT vs baseline vs finetuned panels
-│   └── visualize_dataloader.py    #   dataloader sanity viz
+├── app/                           # CLI entrypoints, grouped by stage (uv run python -m calder.app.<group>.<x>)
+│   ├── dataset/                   #   dataset construction + inspection
+│   │   ├── build_manifest.py      #     frames_meta.json -> manifest.jsonl
+│   │   ├── split_manifest.py      #     manifest -> 70/30 train/test (random | contiguous)
+│   │   ├── build_finetune_dataset.py #  curated multi-session dataset (shards + split + manifests)
+│   │   └── visualize_dataloader.py   #  dataloader sanity viz
+│   ├── finetune/
+│   │   └── finetune.py            #   single-GPU finetune + per-epoch eval
+│   └── evaluate/
+│       └── evaluate.py            #   eval a checkpoint; GT vs baseline vs finetuned panels
 ├── test/
 │   └── overfit_one_batch.py       # sanity gate: overfit ONE fixed batch to ~0 loss
 ├── datasets/                      # all jsonl
@@ -40,13 +44,13 @@ different session / checkpoints.
 ## How to run
 
 Run everything from the `metric_depth/` directory with `uv run` (see the repo's
-uv environment). Module paths are `calder.app.<name>` / `calder.test.<name>`.
+uv environment). Module paths are `calder.app.<group>.<name>` / `calder.test.<name>`.
 
 ```bash
 cd metric_depth
 
 # 1. Build manifest (defaults to config.paths.DATA_ROOT / MANIFEST)
-uv run python -m calder.app.build_manifest
+uv run python -m calder.app.dataset.build_manifest
 
 # 2. Sanity gate (optional): overfit a single fixed batch to ~0 loss
 uv run python -m calder.test.overfit_one_batch \
@@ -54,20 +58,20 @@ uv run python -m calder.test.overfit_one_batch \
     --metric-checkpoint --max-depth 20 --steps 1500 --bs 2 --lr 1e-5
 
 # 3. Split (all 3 left cams; --camera-name "" disables the single-camera filter)
-uv run python -m calder.app.split_manifest --camera-name "" --split-mode contiguous \
+uv run python -m calder.app.dataset.split_manifest --camera-name "" --split-mode contiguous \
     --train-out calder/datasets/splits/all_cams/train_contiguous.jsonl \
     --test-out  calder/datasets/splits/all_cams/test_contiguous.jsonl
 
 # 4. Finetune (init from full Hypersim metric ckpt; dual-LR + poly decay + hflip)
 #    best.pth is selected on --val-manifest; TEST is left untouched for step 5.
-uv run python -m calder.app.finetune \
+uv run python -m calder.app.finetune.finetune \
     --train-manifest calder/datasets/splits/all_cams/train_contiguous.jsonl \
     --val-manifest   calder/datasets/splits/all_cams/val_contiguous.jsonl \
     --max-depth 20 --epochs 10 --bs 4 --lr 5e-6 \
     --out-dir calder/results/finetune/all_cams/contiguous
 
 # 5. Compare baseline vs finetuned on the held-out TEST set (metrics + qual panels)
-uv run python -m calder.app.evaluate \
+uv run python -m calder.app.evaluate.evaluate \
     --test-manifest calder/datasets/splits/all_cams/test_contiguous.jsonl \
     --checkpoint calder/results/finetune/all_cams/contiguous/best.pth \
     --baseline-checkpoint ../checkpoints/depth_anything_v2_metric_hypersim_vits.pth \

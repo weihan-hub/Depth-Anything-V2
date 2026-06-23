@@ -12,7 +12,7 @@ The TEST split is NOT touched here -- it stays untouched until you run
 app/evaluate.py once on best.pth for the final, unbiased report.
 
     cd metric_depth
-    uv run python -m calder.app.finetune \
+    uv run python -m calder.app.finetune.finetune \
         --train-manifest calder/datasets/splits/all_cams/train_contiguous.jsonl \
         --val-manifest   calder/datasets/splits/all_cams/val_contiguous.jsonl \
         --max-depth 20 --epochs 10 --bs 4 --lr 5e-6 \
