@@ -10,6 +10,7 @@
 
 import logging
 
+import torch.nn.functional as F
 from torch import Tensor
 from torch import nn
 
@@ -49,14 +50,17 @@ class Attention(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
 
-        q, k, v = qkv[0] * self.scale, qkv[1], qkv[2]
-        attn = q @ k.transpose(-2, -1)
+        # Memory-efficient / flash attention via torch SDPA, replacing the naive
+        # O(N^2) path (which OOMs ViT-L at 518 without xformers). Mathematically
+        # identical: SDPA applies its own 1/sqrt(head_dim) scaling == self.scale,
+        # so q is NOT pre-scaled here.
+        x = F.scaled_dot_product_attention(
+            q, k, v, dropout_p=self.attn_drop.p if self.training else 0.0
+        )
 
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
-
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
