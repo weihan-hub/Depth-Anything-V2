@@ -52,7 +52,7 @@ def evaluate(model, loader, min_depth, max_depth, device):
         valid = sample['valid_mask'].to(device)[0]
         pred = model(img)
         pred = F.interpolate(pred[:, None], depth.shape[-2:],
-                             mode='bilinear', align_corners=True)[0, 0]
+                             mode='nearest', align_corners=None)[0, 0]
         mask = (valid == 1) & (depth >= min_depth) & (depth <= max_depth)
         if mask.sum() < 10:
             continue
@@ -81,6 +81,11 @@ def main():
     ap.add_argument("--img-size", type=int, default=518)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--out-dir", default=os.path.join(paths.RESULTS_FINETUNE, "run"))
+    ap.add_argument("--freeze-encoder", action="store_true",
+                    help="freeze the DINOv2 encoder (train only the depth head) to preserve "
+                         "DA-V2's general features and reduce cross-camera overfitting")
+    ap.add_argument("--unfreeze-last-n", type=int, default=0,
+                    help="with --freeze-encoder, still train the last N encoder blocks (0 = full freeze)")
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -107,13 +112,42 @@ def main():
           f"{len(info.unexpected_keys)} unexpected")
     model = model.to(device)
 
+    # --- optional: freeze the encoder, train only the depth head ---
+    if args.freeze_encoder:
+        for n, p in model.named_parameters():
+            if 'pretrained' in n:
+                p.requires_grad = False                       # (1) no gradient / no update
+        if args.unfreeze_last_n > 0:                          # re-enable the last N encoder blocks
+            blocks = model.pretrained.blocks
+            for blk in blocks[len(blocks) - args.unfreeze_last_n:]:
+                for p in blk.parameters():
+                    p.requires_grad = True
+        n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        n_total = sum(p.numel() for p in model.parameters())
+        print(f"freeze-encoder: unfreeze_last_n={args.unfreeze_last_n}  "
+              f"trainable {n_train:,} / {n_total:,} params ({100 * n_train / n_total:.1f}%)")
+
     criterion = SiLogLoss()
-    optimizer = AdamW([
-        {'params': [p for n, p in model.named_parameters() if 'pretrained' in n], 'lr': args.lr},
-        {'params': [p for n, p in model.named_parameters() if 'pretrained' not in n], 'lr': args.lr * 10.0},
-    ], lr=args.lr, betas=(0.9, 0.999), weight_decay=0.01)
+    if args.freeze_encoder:
+        # (2) optimizer only sees params that are still trainable
+        enc = [p for n, p in model.named_parameters()
+               if 'pretrained' in n and p.requires_grad]      # unfrozen last-N blocks (if any)
+        head = [p for n, p in model.named_parameters()
+                if 'pretrained' not in n and p.requires_grad]
+        groups = [{'params': head, 'lr': args.lr * 10.0}]
+        if enc:
+            groups.append({'params': enc, 'lr': args.lr})
+        optimizer = AdamW(groups, lr=args.lr, betas=(0.9, 0.999), weight_decay=0.01)
+    else:
+        optimizer = AdamW([
+            {'params': [p for n, p in model.named_parameters() if 'pretrained' in n], 'lr': args.lr},
+            {'params': [p for n, p in model.named_parameters() if 'pretrained' not in n], 'lr': args.lr * 10.0},
+        ], lr=args.lr, betas=(0.9, 0.999), weight_decay=0.01)
 
     total_iters = args.epochs * len(trainloader)
+    # per-group LR multiplier (relative to args.lr) so the poly schedule works for
+    # both the frozen (head-first) and non-frozen (encoder-first) group orderings
+    lr_mults = [g['lr'] / args.lr for g in optimizer.param_groups]
 
     # --- baseline eval before any training step ---
     base_metrics, base_n = evaluate(model, valloader, args.min_depth, args.max_depth, device)
@@ -143,8 +177,8 @@ def main():
 
             iters = epoch * len(trainloader) + i
             lr = args.lr * (1 - iters / total_iters) ** 0.9
-            optimizer.param_groups[0]["lr"] = lr
-            optimizer.param_groups[1]["lr"] = lr * 10.0
+            for g, mult in zip(optimizer.param_groups, lr_mults):
+                g["lr"] = lr * mult
 
             if i % 50 == 0:
                 print(f"  epoch {epoch} iter {i}/{len(trainloader)} "
