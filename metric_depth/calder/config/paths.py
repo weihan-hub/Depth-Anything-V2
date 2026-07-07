@@ -38,6 +38,8 @@ FT_DATASET_META = os.path.join(FINETUNE_DATASET_ROOT, "dataset_meta.json")
 CHECKPOINTS = os.path.join(REPO_ROOT, "checkpoints")
 METRIC_HYPERSIM_VITS = os.path.join(CHECKPOINTS, "depth_anything_v2_metric_hypersim_vits.pth")
 RELATIVE_VITS = os.path.join(CHECKPOINTS, "depth_anything_v2_vits.pth")
+RELATIVE_VITL = os.path.join(CHECKPOINTS, "depth_anything_v2_vitl.pth")
+METRIC_HYPERSIM_VITL = os.path.join(CHECKPOINTS, "depth_anything_v2_metric_hypersim_vitl.pth")
 
 # --- datasets (manifest + splits) ---
 DATASETS = os.path.join(CALDER_ROOT, "datasets")

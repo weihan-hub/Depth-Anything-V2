@@ -17,15 +17,19 @@ from dataset.transform import Resize, NormalizeImage, PrepareForNet, Crop
 
 class CalderDepthDataset(Dataset):
     def __init__(self, manifest_path, mode='train', size=(518, 518),
-                 camera_name=None):
+                 camera_name=None, path_remap=None):
         """
         manifest_path: path to manifest.jsonl produced by build_manifest.py
         mode: 'train' (resizes depth + random crop) or 'val' (image-only resize)
         size: network input (h, w), both multiples of 14
         camera_name: if set, keep only rows with this camera (e.g. for overfit)
+        path_remap: optional (old_prefix, new_prefix) to rewrite rgb/gt paths in
+            the manifest -- used when the dataset has moved on disk (e.g. the
+            finetune set was relocated from /mnt/data/... to /Data/wwh/...).
         """
         self.mode = mode
         self.size = size
+        self.path_remap = path_remap
 
         with open(manifest_path) as f:
             self.entries = [json.loads(line) for line in f if line.strip()]
@@ -48,14 +52,21 @@ class CalderDepthDataset(Dataset):
             PrepareForNet(),
         ] + ([Crop(size[0])] if self.mode == 'train' else []))
 
+    def _resolve(self, path):
+        if self.path_remap is not None:
+            old, new = self.path_remap
+            if path.startswith(old):
+                return new + path[len(old):]
+        return path
+
     def __getitem__(self, item):
         entry = self.entries[item]
 
-        image = cv2.imread(entry['rgb_path'])
+        image = cv2.imread(self._resolve(entry['rgb_path']))
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB) / 255.0
 
         # uint16 PNG in millimeters; 0 = invalid. IMREAD_UNCHANGED keeps 16-bit.
-        depth_mm = cv2.imread(entry['gt_depth_path'], cv2.IMREAD_UNCHANGED)
+        depth_mm = cv2.imread(self._resolve(entry['gt_depth_path']), cv2.IMREAD_UNCHANGED)
         depth = depth_mm.astype(np.float32) / 1000.0  # -> meters
 
         sample = self.transform({'image': image, 'depth': depth})
