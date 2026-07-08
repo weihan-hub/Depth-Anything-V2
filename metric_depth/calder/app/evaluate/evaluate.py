@@ -28,6 +28,7 @@ import matplotlib.pyplot as plt
 from calder.config import paths
 from calder.lib.dataset import CalderDepthDataset
 from calder.lib.model import MODEL_CONFIGS, build_model, load_state_flexible
+from calder.app.finetune.relative_to_metric import RelativeToMetricModel
 from util.metric import eval_depth
 
 METRIC_KEYS = ['d1', 'd2', 'd3', 'abs_rel', 'sq_rel', 'rmse', 'rmse_log', 'log10', 'silog']
@@ -52,16 +53,31 @@ def main():
     ap.add_argument("--tag", default="eval")
     ap.add_argument("--out-dir", default=paths.RESULTS_EVAL)
     ap.add_argument("--n-viz", type=int, default=4)
+    ap.add_argument("--mapping", action="store_true",
+                    help="the --checkpoint is a RelativeToMetricModel (frozen relative "
+                         "backbone + per-frame scale/offset head), not a metric DA-V2")
+    ap.add_argument("--path-remap-old", default=None,
+                    help="manifest path prefix to rewrite (relocated dataset)")
+    ap.add_argument("--path-remap-new", default=None, help="replacement path prefix")
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     size = (args.img_size, args.img_size)
+    remap = ((args.path_remap_old, args.path_remap_new)
+             if args.path_remap_old and args.path_remap_new else None)
 
-    model = build_model(args.encoder, args.max_depth)
-    info = model.load_state_dict(load_state_flexible(args.checkpoint), strict=False)
-    print(f"[{args.tag}] loaded {args.checkpoint}: "
-          f"{len(info.missing_keys)} missing / {len(info.unexpected_keys)} unexpected")
+    if args.mapping:
+        model = RelativeToMetricModel(encoder=args.encoder, checkpoint=None,
+                                      max_depth=args.max_depth)
+        info = model.load_state_dict(load_state_flexible(args.checkpoint), strict=True)
+        print(f"[{args.tag}] loaded mapping {args.checkpoint} (strict): "
+              f"{len(info.missing_keys)} missing / {len(info.unexpected_keys)} unexpected")
+    else:
+        model = build_model(args.encoder, args.max_depth)
+        info = model.load_state_dict(load_state_flexible(args.checkpoint), strict=False)
+        print(f"[{args.tag}] loaded {args.checkpoint}: "
+              f"{len(info.missing_keys)} missing / {len(info.unexpected_keys)} unexpected")
     model = model.to(device).eval()
 
     baseline_model = None
@@ -72,7 +88,7 @@ def main():
               f"{len(binfo.missing_keys)} missing / {len(binfo.unexpected_keys)} unexpected")
         baseline_model = baseline_model.to(device).eval()
 
-    testset = CalderDepthDataset(args.test_manifest, mode='val', size=size)
+    testset = CalderDepthDataset(args.test_manifest, mode='val', size=size, path_remap=remap)
     loader = DataLoader(testset, batch_size=1, shuffle=False, num_workers=4)
 
     agg = {k: 0.0 for k in METRIC_KEYS}
@@ -87,7 +103,7 @@ def main():
             valid = sample['valid_mask'].to(device)[0]
             pred = model(img)
             pred = F.interpolate(pred[:, None], depth.shape[-2:],
-                                 mode='bilinear', align_corners=True)[0, 0]
+                                 mode='nearest', align_corners=None)[0, 0]
             mask = (valid == 1) & (depth >= args.min_depth) & (depth <= args.max_depth)
             if mask.sum() < 10:
                 continue
@@ -114,7 +130,7 @@ def main():
                 if baseline_model is not None:
                     bp = baseline_model(img)
                     bp = F.interpolate(bp[:, None], depth.shape[-2:],
-                                       mode='bilinear', align_corners=True)[0, 0]
+                                       mode='nearest', align_corners=None)[0, 0]
                     base_pr = bp.cpu().numpy()
                 viz.append((sample['image'][0].cpu().numpy(),
                             depth.cpu().numpy(), pred.cpu().numpy(),

@@ -20,7 +20,7 @@ ds = CalderDepthDataset(args.manifest, mode='val', size=(518, 518), path_remap=r
 ds.entries = ds.entries[:args.n]
 dl = DataLoader(ds, batch_size=1, shuffle=False, num_workers=8)
 
-model = RelativeToMetricModel('vitl', paths.RELATIVE_VITL, mode='affine',
+model = RelativeToMetricModel('vitl', paths.RELATIVE_VITL,
                               max_depth=args.max_depth).to(dev).eval()
 
 # collect rel + depth for a global fit

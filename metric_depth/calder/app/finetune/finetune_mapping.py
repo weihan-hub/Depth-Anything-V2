@@ -16,7 +16,7 @@ Mirrors ``finetune.py`` (same dataset / SiLog loss / eval / checkpointing) but:
         --train-manifest /home/weihanwang/workspace/exp/train_real.jsonl \
         --val-manifest   /home/weihanwang/workspace/exp/val_real_sub.jsonl \
         --encoder vitl --checkpoint ../checkpoints/depth_anything_v2_vitl.pth \
-        --mode affine --max-depth 20 --epochs 10 --bs 16 --lr 1e-3 \
+        --max-depth 20 --epochs 10 --bs 16 --lr 1e-3 \
         --data-root-old /mnt/data/data/calder/fine_tune_dataset \
         --data-root-new /Data/wwh/fine_tune_dataset \
         --out-dir calder/results/finetune/mapping_affine
@@ -75,9 +75,6 @@ def main():
     ap.add_argument("--encoder", default="vitl", choices=list(_choices()))
     ap.add_argument("--checkpoint", default=paths.RELATIVE_VITL,
                     help="RELATIVE DA-V2 checkpoint (frozen backbone).")
-    ap.add_argument("--mode", default="conditioned", choices=["conditioned", "affine"],
-                    help="conditioned = per-image affine from CLS features (default); "
-                         "affine = single global affine (weak baseline)")
     ap.add_argument("--hidden", type=int, default=256, help="conditioning MLP hidden width")
     ap.add_argument("--bs", type=int, default=16)
     ap.add_argument("--epochs", type=int, default=10)
@@ -116,11 +113,11 @@ def main():
 
     # --- model: FROZEN relative backbone + trainable mapping head ---
     model = RelativeToMetricModel(encoder=args.encoder, checkpoint=args.checkpoint,
-                                  mode=args.mode, max_depth=args.max_depth,
+                                  max_depth=args.max_depth,
                                   hidden=args.hidden).to(device)
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
     n_total = sum(p.numel() for p in model.parameters())
-    print(f"mapping mode={args.mode}  trainable {n_train:,} / {n_total:,} params "
+    print(f"per-frame conditioned mapping  trainable {n_train:,} / {n_total:,} params "
           f"({100 * n_train / n_total:.4f}%)")
 
     # --- data-driven warm start of the global affine anchor from one batch ---

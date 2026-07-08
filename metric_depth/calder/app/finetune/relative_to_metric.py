@@ -8,27 +8,31 @@ module keeps the released **relative** DA-V2 checkpoint completely frozen and
 learns only a tiny mapping from its (affine-invariant, disparity-like) output
 to metric depth.
 
-Why a *conditioned* affine (not a single global one)
-----------------------------------------------------
+Per-frame affine, conditioned on the image
+------------------------------------------
 DA-V2's relative head is trained scale-and-shift-invariant, so its output is
 disparity **up to a per-image affine** -- the scale/shift drift from image to
 image.  Empirically (see ``probe.py``) a *per-image* affine recovers metric
 depth well (abs_rel ~0.12), but a *single global* affine does not (abs_rel
 ~0.55): the backbone is not scale-consistent across images.
 
-So we predict the affine **per image**, conditioned on the frozen encoder's
+So we predict the affine **per frame**, conditioned on the frozen encoder's
 pooled CLS features (which encode scene scale cues), and apply it to the frozen
 disparity map::
 
-    scale, shift = MLP(cls_features)          # one (scale>0, shift) per image
+    scale, shift = affine_predictor(cls_features)   # one (scale>0, shift) per frame
     disparity    = scale * rel + shift
     metric       = 1 / disparity
 
-Because the affine is *shared across all pixels of an image* and monotonic
+Because the affine is *shared across all pixels of a frame* and monotonic
 (scale > 0), the relative ordering of the frozen prediction is preserved
-exactly -- only the per-image scale/offset is learned.  The MLP is initialised
-so its prediction starts at a data-fit *global* affine and learns per-image
-residuals from there.
+exactly -- only the per-frame scale/offset is learned.
+
+The predictor is parameterised as a learnable **global anchor** (scale_raw,
+shift) plus a per-frame **residual** from a small MLP.  The anchor is warm
+started (see ``RelToMetricHead.init_from_batch``) to a data-fit global affine
+and the MLP starts at ~0 residual, so training begins at that global affine and
+learns per-frame corrections from there.
 
 The heavy encoder runs under ``no_grad`` (frozen); training touches only the
 tiny head, so memory is small and batches can be large.
@@ -52,15 +56,36 @@ def build_relative_model(encoder='vitl'):
     """Construct the released *relative* DepthAnythingV2 backbone (ReLU disparity
     head), NOT the metric one (Sigmoid * max_depth).
 
-    We run from ``metric_depth/`` so a bare ``import depth_anything_v2`` resolves
-    to the metric variant; prepending REPO_ROOT makes it resolve to the relative
-    variant.  The repo root has no ``dataset`` / ``util`` / ``calder`` package,
-    so those still resolve to metric_depth -- no collateral shadowing.
+    We run from ``metric_depth/`` where ``depth_anything_v2`` normally resolves to
+    the *metric* variant.  Prepending REPO_ROOT is not enough on its own: if the
+    metric ``depth_anything_v2`` is already in ``sys.modules`` (e.g. imported by
+    ``calder.lib.model``), a plain ``import`` returns that cached metric module,
+    silently giving a Sigmoid-headed backbone whose disparity is squashed to
+    [0, 1] -- which then loads fine (identical param keys!) but is wrong.
+
+    So we stash any cached ``depth_anything_v2*`` modules, import the relative
+    package from REPO_ROOT under a clean slate, then restore the originals so the
+    rest of the process still sees the metric variant.
     """
-    if paths.REPO_ROOT not in sys.path:
-        sys.path.insert(0, paths.REPO_ROOT)
-    from depth_anything_v2.dpt import DepthAnythingV2 as RelativeDepthAnythingV2
-    return RelativeDepthAnythingV2(**_REL_CONFIGS[encoder])
+    import importlib
+
+    prefix = 'depth_anything_v2'
+    saved = {k: sys.modules.pop(k) for k in list(sys.modules)
+             if k == prefix or k.startswith(prefix + '.')}
+    sys.path.insert(0, paths.REPO_ROOT)
+    try:
+        RelativeDepthAnythingV2 = importlib.import_module(prefix + '.dpt').DepthAnythingV2
+        model = RelativeDepthAnythingV2(**_REL_CONFIGS[encoder])
+    finally:
+        try:
+            sys.path.remove(paths.REPO_ROOT)
+        except ValueError:
+            pass
+        # drop our freshly-imported relative modules, restore the cached ones
+        for k in [k for k in sys.modules if k == prefix or k.startswith(prefix + '.')]:
+            del sys.modules[k]
+        sys.modules.update(saved)
+    return model
 
 
 def load_relative_state(checkpoint_path):
@@ -76,59 +101,44 @@ def _inv_softplus(y):
 
 
 class RelToMetricHead(nn.Module):
-    """Frozen relative (disparity-like) prediction -> metric depth.
+    """Per-frame affine mapping: frozen disparity-like ``rel`` -> metric depth.
 
-    Modes:
-      * ``conditioned`` (default): per-image affine (scale, shift) predicted from
-        pooled CLS features -- adapts to the backbone's per-image scale drift.
-      * ``affine``: a single global (scale, shift). Baseline / reference only;
-        the backbone is not globally scale-consistent so this underperforms.
+    The affine ``(scale > 0, shift)`` is predicted per frame from pooled CLS
+    features -- a learnable global *anchor* plus a small-MLP per-frame *residual*.
+    Applying a single monotonic affine per frame preserves the frozen
+    prediction's relative ordering exactly.
     """
 
-    def __init__(self, mode='conditioned', cond_dim=4096, max_depth=20.0,
-                 hidden=256, eps=1e-3):
+    def __init__(self, cond_dim=4096, max_depth=20.0, hidden=256, eps=1e-3):
         super().__init__()
-        self.mode = mode
         self.max_depth = float(max_depth)
         self.eps = float(eps)
         self._min_disp = 1.0 / self.max_depth
 
-        # global affine "anchor" (also the whole model in ``affine`` mode); the
-        # conditioned MLP predicts per-image residuals around this anchor.
+        # global affine anchor (warm started from data); the MLP predicts a
+        # per-frame residual around it (starts at ~0 -> begins as global affine).
         self.scale_raw = nn.Parameter(_inv_softplus(1.0))   # scale = softplus(.)
         self.shift = nn.Parameter(torch.tensor(0.0))
-
-        if mode == 'conditioned':
-            self.mlp = nn.Sequential(
-                nn.Linear(cond_dim, hidden), nn.GELU(),
-                nn.Linear(hidden, hidden), nn.GELU(),
-                nn.Linear(hidden, 2),
-            )
-            # start at ~0 residual so the initial mapping == the global anchor
-            with torch.no_grad():
-                self.mlp[-1].weight.mul_(0.0)
-                self.mlp[-1].bias.zero_()
-        elif mode != 'affine':
-            raise ValueError(f"unknown mode: {mode}")
+        self.mlp = nn.Sequential(
+            nn.Linear(cond_dim, hidden), nn.GELU(),
+            nn.Linear(hidden, hidden), nn.GELU(),
+            nn.Linear(hidden, 2),
+        )
+        with torch.no_grad():                                # start at 0 residual
+            self.mlp[-1].weight.mul_(0.0)
+            self.mlp[-1].bias.zero_()
 
     def _scale_shift(self, cond):
-        """Return per-sample (scale>0, shift), shape (B,) each."""
-        if self.mode == 'affine' or cond is None:
-            scale = F.softplus(self.scale_raw).expand(1)
-            shift = self.shift.expand(1)
-            return scale, shift
-        res = self.mlp(cond)                                 # (B,2) residuals
-        scale = F.softplus(self.scale_raw + res[:, 0])       # (B,)
-        shift = self.shift + res[:, 1]                        # (B,)
+        """cond: (B, cond_dim) -> per-frame (scale>0, shift), each (B,)."""
+        res = self.mlp(cond)                                 # (B, 2) residuals
+        scale = F.softplus(self.scale_raw + res[:, 0])
+        shift = self.shift + res[:, 1]
         return scale, shift
 
-    def forward(self, rel, cond=None):
-        """rel: (B,H,W) disparity-like; cond: (B,cond_dim) or None -> metric (B,H,W)."""
+    def forward(self, rel, cond):
+        """rel: (B,H,W) disparity-like; cond: (B,cond_dim) -> metric (B,H,W)."""
         scale, shift = self._scale_shift(cond)
-        if scale.numel() == 1:                               # global broadcast
-            disp = scale * rel + shift
-        else:
-            disp = scale[:, None, None] * rel + shift[:, None, None]
+        disp = scale[:, None, None] * rel + shift[:, None, None]
         disp = disp.clamp(min=self._min_disp)                # depth <= max_depth
         return (1.0 / disp).clamp(self.eps, self.max_depth)
 
@@ -158,8 +168,7 @@ class RelativeToMetricModel(nn.Module):
     the head has gradients.
     """
 
-    def __init__(self, encoder='vitl', checkpoint=None, mode='conditioned',
-                 max_depth=20.0, hidden=256):
+    def __init__(self, encoder='vitl', checkpoint=None, max_depth=20.0, hidden=256):
         super().__init__()
         self.encoder = encoder
         self.relative = build_relative_model(encoder)
@@ -175,7 +184,7 @@ class RelativeToMetricModel(nn.Module):
 
         embed = self.relative.pretrained.embed_dim
         n_layers = len(self.relative.intermediate_layer_idx[encoder])
-        self.head = RelToMetricHead(mode=mode, cond_dim=embed * n_layers,
+        self.head = RelToMetricHead(cond_dim=embed * n_layers,
                                     max_depth=max_depth, hidden=hidden)
 
     def train(self, mode=True):
